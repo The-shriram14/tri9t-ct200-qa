@@ -49,6 +49,8 @@ def test_table_like_rows_are_retained_as_ordered_text(parsed_v1):
     assert "E1" in errors.body_text and "E5" in errors.body_text and "Overpressure condition" in errors.body_text
     assert specs.metadata.get("table_like_content") is True
     assert errors.metadata.get("table_like_content") is True
+    assert "| Parameter | Value |" in specs.body_text
+    assert "| E1 | Cuff not connected or leak detected | Aborts measurement, displays E1 |" in errors.body_text
 
 def test_v2_has_added_section_and_real_requirement_changes(parsed_v1, parsed_v2):
     old_battery = next(n for n in parsed_v1.nodes if n.section_number == "2.1.1.1")
@@ -57,3 +59,5 @@ def test_v2_has_added_section_and_real_requirement_changes(parsed_v1, parsed_v2)
     assert "250 measurement cycles" in new_battery.body_text
     assert old_battery.content_hash != new_battery.content_hash
     assert any(n.section_number == "5.3" for n in parsed_v2.nodes)
+    error_table = next(n for n in parsed_v2.nodes if n.section_number == "4.2")
+    assert "| E6 | Bluetooth sync failure |" in error_table.body_text

@@ -12,7 +12,7 @@ I inspected the native text extraction and rendered pages of both PDFs before im
 
 The parser processes lines in their visual/source order. Numbered headings are recognized using section-number patterns plus typography (bold font or larger font size). Body paragraphs, numbered lists, and table-like rows remain attached to the current section until the next recognized heading. The parser records warnings instead of silently normalizing unusual numbering or order.
 
-Table contents are retained as ordered text rows inside the relevant section node. The tables are visible in the rendered PDF, but native text extraction does not consistently expose clean cell geometry; I chose preservation of values over fabricating a cell layout. The approach document and node metadata disclose this limitation.
+The two known tables (`2.1 General Specifications` and `4.2 Error Codes`) are reconstructed with pdfplumber's grid-aware extraction and stored as Markdown table text inside their section nodes. This keeps cells grouped by row for these tables. If a table is not confidently detected, the parser retains native linearized text and emits a warning rather than pretending the cell layout is correct. More complex/unruled tables remain a known limitation.
 
 ## 3. Hierarchy reconstruction
 
@@ -27,7 +27,7 @@ Repeated heading text is not used as a unique identifier. The same “Error Code
 1. **Skipped hierarchy level:** `2.1.1.1 Battery Life Under Typical Use` follows `2.1 General Specifications`, with no explicit `2.1.1` node. The parser retains the literal section number, attaches it to the nearest existing ancestor, and emits a warning.
 2. **Out-of-order section numbering:** `3.4 Auto Shutoff` appears before `3.3 Result Display and Classification`. Source order is preserved and a warning is emitted.
 3. **Duplicate heading text:** “Error Codes” appears under section 4 (alarm/error behavior) and section 7 (troubleshooting). Tests assert that these nodes remain separate and have the correct parents.
-4. **Tables:** Section `2.1 General Specifications` and section `4.2 Error Codes` contain tables. Their text is preserved in row order, but full cell geometry is not reliably reconstructed; metadata marks these nodes as table-like so this limitation is explicit.
+4. **Tables:** Section `2.1 General Specifications` and section `4.2 Error Codes` contain tables. pdfplumber reconstructs these two tables as Markdown rows, and tests verify representative cells. More complex tables may still fall back to linearized text, with a warning and metadata rather than a silent guess.
 5. **Paragraphs spanning page breaks:** In v2, the cleaning instructions in section 6.1 continue onto the following page, and section 8.1 continues onto the last page. The line stream remains attached to the current section until the next recognized heading.
 6. **Version content changes:** v2 revises battery-life estimates and the low-battery threshold, changes cuff inflation increments, changes the E3 auto-deflation time, adds E6, and adds section 5.3 Data Export. These are useful real changes for the versioning and stale-generation demonstration.
 
@@ -93,10 +93,10 @@ FastAPI exposes ingestion, version listing, section browsing, node retrieval, se
 ## 11. Decision log (required)
 
 **What is most likely to silently give wrong results, and how would you catch it?**
-The highest-risk silent error is a heading or paragraph being assigned to the wrong parent while still producing a clean-looking tree. I catch this with targeted hierarchy tests, source-order warnings, and visual comparison of the rendered PDF against the parsed tree; ambiguous matches should be surfaced rather than guessed.
+The highest-risk silent error is a heading or paragraph being assigned to the wrong parent while still producing a clean-looking tree; a second risk is a table cell being associated with the wrong row. I catch these with targeted hierarchy/table tests, source-order warnings, and visual comparison of the rendered PDF against the parsed tree; ambiguous matches should be surfaced rather than guessed.
 
 **Where did you choose simplicity over correctness because of time, and what would break first in production?**
-I preserve table content as ordered text instead of reconstructing every cell boundary, and I use a JSON file for generated output instead of MongoDB. Complex tables would be the first extraction weakness; concurrent generation writes and larger output volumes would be the first storage weakness.
+I reconstruct the two known tables as Markdown but do not implement a fully general cell-layout engine, and I use a JSON file for generated output instead of MongoDB. A complex or merged-cell table would be the first extraction weakness; concurrent generation writes and larger output volumes would be the first storage weakness.
 
 **Name one input you did not handle and what happens when it appears.**
 I do not confidently resolve a section whose numbering, heading, and parent all change between versions. The matcher creates a new logical ID rather than forcing an unsafe match; the older source is then reported as removed/unmatched during stale retrieval. A future version should record match candidates and confidence for human review.

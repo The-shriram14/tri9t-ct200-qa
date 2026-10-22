@@ -4,7 +4,7 @@ A focused FastAPI backend for the supplied CardioTrack CT-200 manuals. It extrac
 
 ## What is implemented
 
-- PDF text/layout extraction with PyMuPDF and an OCR heading fallback for sparse pages (Tesseract, when available).
+- PDF text/layout extraction with PyMuPDF, grid-aware table extraction with pdfplumber, and a Tesseract OCR fallback for sparse text-layer pages (when available).
 - Heading hierarchy based on section numbering and PDF typography; source order is preserved.
 - SHA-256 content hashes per node and stable logical IDs matched across versions.
 - SQLite + SQLAlchemy for versions, nodes, parent/child relationships, and selections.
@@ -136,7 +136,7 @@ The same selection can be submitted repeatedly; each successful request creates 
 ## Known limitations
 
 - This is a document-specific prototype, not a generic parser for arbitrary PDFs.
-- Table cells are retained in ordered text where possible, but complex cell geometry is not fully reconstructed as a relational table.
+- The two known CT-200 tables are reconstructed as Markdown rows; complex or merged-cell tables may fall back to linearized text and should be visually reviewed.
 - Logical matching can be ambiguous if section numbering, parent structure, and heading text all change; ambiguous matches may be reported as removed/unmatched.
 - Staleness is conservative: any change in a selected node's subtree marks the generated cases for review. It does not understand clinical severity or decide whether a wording change is material.
 - The JSON generation store is appropriate for a single-process assignment demo; multi-process concurrent writers and larger production workloads should use a transactional store such as MongoDB.

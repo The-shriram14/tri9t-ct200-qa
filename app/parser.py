@@ -20,6 +20,13 @@ except Exception:
     Image = None
     OCR_AVAILABLE = False
 
+try:
+    import pdfplumber
+    PDFPLUMBER_AVAILABLE = True
+except Exception:
+    pdfplumber = None
+    PDFPLUMBER_AVAILABLE = False
+
 SECTION_RE = re.compile(r"^\s*(\d+(?:\.\d+)*\.?)\s+(.+?)\s*$")
 LIST_RE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+")
 TITLE = "CardioTrack CT-200 Home Blood Pressure Monitor — Technical & User Manual"
@@ -87,13 +94,8 @@ def _native_lines(page, page_num: int) -> list[Line]:
     return sorted(out, key=lambda z: (round(z.y, 1), z.x))
 
 
-def _ocr_heading_candidates(page, page_num: int, native_lines: list[Line]) -> list[Line]:
-    """Recover large numbered headings omitted from the PDF text layer.
-
-    This is a fallback, not a replacement for native extraction. Large type is
-    required so numbered clinical-classification list items are not promoted to
-    section headings.
-    """
+def _ocr_page_lines(page, page_num: int, native_lines: list[Line]) -> list[Line]:
+    """Recover all visible lines from a page with a sparse native text layer."""
     if not OCR_AVAILABLE:
         return []
     try:
@@ -108,23 +110,19 @@ def _ocr_heading_candidates(page, page_num: int, native_lines: list[Line]) -> li
             continue
         key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
         grouped.setdefault(key, []).append(i)
-    candidates = []
+    candidates: list[Line] = []
+    native_norms = [normalize_text(x.text).casefold() for x in native_lines]
     for ids in grouped.values():
         txt = normalize_text(" ".join(data["text"][i] for i in ids))
-        if not SECTION_RE.match(txt):
+        if not txt:
+            continue
+        norm = txt.casefold()
+        if any(norm == old or (len(norm) > 24 and norm in old) or (len(old) > 24 and old in norm) for old in native_norms):
             continue
         height = max(data["height"][i] for i in ids)
-        if height < 28:  # at 2x render, ordinary body/list text is shorter
-            continue
-        norm = normalize_text(txt).casefold()
-        if any(normalize_text(x.text).casefold() == norm for x in native_lines):
-            continue
-        # Avoid duplicating a native heading whose OCR punctuation differs slightly.
-        if any(normalize_text(x.text).casefold().startswith(norm[:18]) for x in native_lines if len(norm) > 18):
-            continue
         y = min(data["top"][i] for i in ids) / 2
         x = min(data["left"][i] for i in ids) / 2
-        candidates.append(Line(txt, page_num, y, x, height / 2, True, "ocr"))
+        candidates.append(Line(txt, page_num, y, x, height / 2, height >= 26, "ocr"))
     return candidates
 
 
@@ -142,6 +140,58 @@ def _heading_parts(line: Line) -> tuple[str, str] | None:
     return number, title
 
 
+def _markdown_table(rows: list[list[str | None]]) -> str:
+    cleaned = [[normalize_text(cell or "").replace("|", "\\|") for cell in row] for row in rows]
+    # Trim trailing empty cells, but keep each extracted row's column order.
+    cleaned = [row[:max((i + 1 for i, cell in enumerate(row) if cell), default=1)] for row in cleaned]
+    width = max((len(row) for row in cleaned), default=0)
+    if not cleaned or width == 0:
+        return ""
+    cleaned = [row + [""] * (width - len(row)) for row in cleaned]
+    lines = ["| " + " | ".join(cleaned[0]) + " |", "| " + " | ".join(["---"] * width) + " |"]
+    lines.extend("| " + " | ".join(row) + " |" for row in cleaned[1:])
+    return "\n".join(lines)
+
+def _replace_known_tables(path: Path, nodes: list[ParsedNode], warnings: list[str]) -> None:
+    """Use grid-aware extraction for the two known CT-200 tables when available."""
+    if not PDFPLUMBER_AVAILABLE:
+        warnings.append("pdfplumber unavailable; table cells remain in native linearized text.")
+        return
+    targets = {
+        "2.1": {"parameter", "value"},
+        "4.2": {"code", "meaning", "device behavior"},
+    }
+    try:
+        with pdfplumber.open(path) as pdf:
+            for node in nodes:
+                expected = targets.get(node.section_number or "")
+                if not expected or not node.page_start:
+                    continue
+                page_idx = node.page_start - 1
+                if page_idx < 0 or page_idx >= len(pdf.pages):
+                    continue
+                found = None
+                for table in pdf.pages[page_idx].extract_tables():
+                    if not table or not table[0]:
+                        continue
+                    header = {normalize_text(c or "").casefold() for c in table[0] if normalize_text(c or "")}
+                    if expected.issubset(header):
+                        found = table
+                        break
+                if found:
+                    node.body_text = _markdown_table(found)
+                    node.metadata["table_like_content"] = True
+                    node.metadata["table_extraction"] = "pdfplumber grid-aware extraction; cell order retained as Markdown table"
+                    node.metadata["table_rows"] = len(found)
+                    node.content_hash = sha256_text(node.heading + "\n" + node.body_text)
+                else:
+                    node.metadata["table_like_content"] = True
+                    node.metadata["table_extraction"] = "Grid extraction not confidently detected; native ordered text retained for visual review"
+                    warnings.append(f"Page {page_idx + 1}: table for section {node.section_number} was not confidently reconstructed; retained native text.")
+    except Exception as exc:
+        warnings.append(f"Table extraction fallback failed ({exc}); native table text retained.")
+
+
 def parse_pdf(path: str | Path) -> ParseResult:
     path = Path(path)
     if not path.exists():
@@ -154,10 +204,9 @@ def parse_pdf(path: str | Path) -> ParseResult:
     ocr_pages: list[int] = []
     for i, page in enumerate(doc, start=1):
         native = _native_lines(page, i)
-        # Hybrid strategy: OCR only sparse pages; otherwise use OCR as a heading
-        # fallback on pages with a visibly missing/empty text layer.
+        # Hybrid strategy: OCR all lines only on sparse native-text pages.
         if sum(len(x.text) for x in native) < 80:
-            supplement = _ocr_heading_candidates(page, i, native)
+            supplement = _ocr_page_lines(page, i, native)
             if supplement:
                 ocr_pages.append(i)
                 native.extend(supplement)
@@ -240,12 +289,8 @@ def parse_pdf(path: str | Path) -> ParseResult:
             expected_parent = ".".join(parts[:-1]) if len(parts) > 1 else None
             if expected_parent and expected_parent not in by_number:
                 warnings.append(f"Section {node.section_number} skips an explicit parent section ({expected_parent}); attached to nearest existing ancestor.")
-    # A few CT-200 table blocks are extracted as linear text. Mark them transparently.
-    for node in nodes:
-        h = node.heading.casefold()
-        if "general specifications" in h or "error codes" in h:
-            node.metadata["table_like_content"] = True
-            node.metadata["table_extraction"] = "Preserved as ordered text rows; verify visually against the PDF table."
+    # Reconstruct the two known tables using grid-aware extraction where possible.
+    _replace_known_tables(path, nodes, warnings)
     # Preserve source order but flag the known numbering order anomaly instead of sorting it away.
     seen_numbers: dict[str, list[str]] = {}
     for node in nodes:
