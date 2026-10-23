@@ -93,13 +93,13 @@ FastAPI exposes ingestion, version listing, section browsing, node retrieval, se
 ## 11. Decision log (required)
 
 **What is most likely to silently give wrong results, and how would you catch it?**
-The highest-risk silent error is a heading or paragraph being assigned to the wrong parent while still producing a clean-looking tree; a second risk is a table cell being associated with the wrong row. I catch these with targeted hierarchy/table tests, source-order warnings, and visual comparison of the rendered PDF against the parsed tree; ambiguous matches should be surfaced rather than guessed.
+PDF hierarchy reconstruction is most likely to silently produce incorrect results because the CT-200 manual contains a skipped subsection level, duplicate headings, and sections out of numerical order. I added tests for these irregularities and would compare the extracted hierarchy against the original PDF to catch incorrect parent-child relationships.
 
 **Where did you choose simplicity over correctness because of time, and what would break first in production?**
-I reconstruct the two known tables as Markdown but do not implement a fully general cell-layout engine, and I use a JSON file for generated output instead of MongoDB. A complex or merged-cell table would be the first extraction weakness; concurrent generation writes and larger output volumes would be the first storage weakness.
+I used a JSON-file store for generated QA outputs instead of introducing another database service to keep the assignment implementation simple. Complex or merged-cell tables could be the first extraction weakness, while concurrent writes could cause reliability problems in production.
 
 **Name one input you did not handle and what happens when it appears.**
-I do not confidently resolve a section whose numbering, heading, and parent all change between versions. The matcher creates a new logical ID rather than forcing an unsafe match; the older source is then reported as removed/unmatched during stale retrieval. A future version should record match candidates and confidence for human review.
+I did not implement confident matching for a section whose numbering, heading, and parent all change between document versions. In this case, the system assigns a new logical ID instead of forcing a potentially incorrect match, and the older section can be reported as removed or unmatched.
 
 ## 12. What I would improve with more time
 
