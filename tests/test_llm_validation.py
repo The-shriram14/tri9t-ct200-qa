@@ -38,3 +38,54 @@ def test_llm_cannot_cite_node_outside_selection(monkeypatch):
     monkeypatch.setattr(llm, "_request", lambda messages: json.dumps(invalid))
     with pytest.raises(llm.LLMGenerationError, match="outside the submitted selection"):
         llm.generate_test_cases([{"node_id": "node-1", "heading": "Battery", "version_number": 1, "text_snapshot": "Battery requirement."}])
+
+
+def test_llm_request_sends_user_agent_and_auth_header(monkeypatch):
+    captured_req = []
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8")
+
+    def fake_urlopen(req, timeout=45):
+        captured_req.append(req)
+        return DummyResponse()
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(llm, "LLM_API_KEY", "gsk_secretkey12345")
+    llm._request([{"role": "user", "content": "hi"}])
+    assert len(captured_req) == 1
+    req = captured_req[0]
+    assert req.get_header("User-agent") == "Tri9T-CT200-QA/1.0"
+    assert req.get_header("Authorization") == "Bearer gsk_secretkey12345"
+
+
+def test_llm_request_http_error_redacts_secrets_and_reports_body(monkeypatch):
+    import io
+    secret_key = "gsk_super_secret_key_12345"
+    monkeypatch.setattr(llm, "LLM_API_KEY", secret_key)
+    error_body = f'{{"error": {{"message": "Access forbidden for key {secret_key}", "code": 403}}}}'.encode("utf-8")
+    http_error = llm.urllib.error.HTTPError(
+        url="https://api.groq.com/openai/v1/chat/completions",
+        code=403,
+        msg="Forbidden",
+        hdrs={},
+        fp=io.BytesIO(error_body)
+    )
+
+    def fake_urlopen(req, timeout=45):
+        raise http_error
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(llm.LLMGenerationError) as exc_info:
+        llm._request([{"role": "user", "content": "test"}])
+    err_text = str(exc_info.value)
+    assert "403" in err_text
+    assert "Forbidden" in err_text
+    assert "Access forbidden for key [REDACTED]" in err_text
+    assert secret_key not in err_text
+
